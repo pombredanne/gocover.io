@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,10 +21,13 @@ import (
 )
 
 var (
-	socket    = flag.String("s", "/var/run/docker.sock", "Dockerd socket")
-	serveAddr = flag.String("p", ":8080", "Address and port to serve")
-	redisAddr = flag.String("r", "127.0.0.1:6379", "redis address")
-	redisPass = flag.String("rp", "", "redis password")
+	docker_socket = flag.String("s", "", "Dockerd socket (e.g., /var/run/docker.sock)")
+	docker_addr   = flag.String("d", "", "Dockerd addr (e.g., 127.0.0.1:2375)")
+	serveAddr     = flag.String("p", ":8080", "Address and port to serve")
+	serveSAddr    = flag.String("ps", ":80443", "Address and port to serve HTTPS")
+	redisAddr     = flag.String("r", "127.0.0.1:6379", "redis address")
+	redisPass     = flag.String("rp", "", "redis password")
+	certPath      = flag.String("tls", "", "cert path")
 )
 
 func docker(repo, version string, pool *r.Pool) (int, string) {
@@ -46,7 +50,17 @@ func docker(repo, version string, pool *r.Pool) (int, string) {
 		}
 	}
 
-	out, err := exec.Command("docker", "-H", "unix://"+*socket, "run", "--rm", "-a", "stdout", "-a", "stderr", worker, repo).CombinedOutput()
+	host := ""
+
+	if *docker_socket != "" {
+		host = "unix://" + *docker_socket
+	} else if *docker_addr != "" {
+		host = "tcp://" + *docker_addr
+	} else {
+		return 500, "cannot connect to docker daemon"
+	}
+
+	out, err := exec.Command("docker", "-H", host, "run", "--rm", "-a", "stdout", "-a", "stderr", worker, repo).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "Unable to find image") {
 			return 500, "go version '" + version + "' not found"
@@ -69,7 +83,7 @@ func docker(repo, version string, pool *r.Pool) (int, string) {
 	content = strings.Replace(content, ".cov7 { color: rgb(128, 128, 128) }", ".cov7 { color: #28D091 }", 2)
 	content = strings.Replace(content, ".cov8 { color: rgb(128, 128, 128) }", ".cov8 { color: #21D994 }", 2)
 	content = strings.Replace(content, ".cov9 { color: rgb(128, 128, 128) }", ".cov9 { color: #1AE297 }", 2)
-
+	content = strings.Replace(content, "<option value=\"file0\">", "<option value=\"file0\" select=\"selected\">", -1)
 	content = strings.Replace(content, "\">"+repo, "\">", -1)
 
 	re = regexp.MustCompile("-- cov:([0-9.]*) --")
@@ -152,13 +166,13 @@ func main() {
 		if coverage, err := redis.GetCoverage(conn, repo); err != nil {
 			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-error-lightgrey.svg?style=flat"))
 		} else if coverage < 25.0 {
-			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%-red.svg?style=flat", coverage))
+			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%25-red.svg?style=flat", coverage))
 		} else if coverage < 50.0 {
-			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%-orange.svg?style=flat", coverage))
+			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%25-orange.svg?style=flat", coverage))
 		} else if coverage < 75.0 {
-			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%-green.svg?style=flat", coverage))
+			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%25-green.svg?style=flat", coverage))
 		} else {
-			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%-brightgreen.svg?style=flat", coverage))
+			r.Redirect(fmt.Sprintf("https://img.shields.io/badge/coverage-%.1f%%25-brightgreen.svg?style=flat", coverage))
 		}
 
 	})
@@ -207,5 +221,16 @@ func main() {
 			r.HTML(200, "loading", contexts)
 		}
 	})
-	log.Fatal(http.ListenAndServe(*serveAddr, m))
+	if *certPath != "" {
+		go func() {
+			log.Println(http.ListenAndServe(*serveAddr, http.HandlerFunc(redir)))
+		}()
+		log.Fatal(http.ListenAndServeTLS(*serveSAddr, filepath.Join(*certPath, "fullchain.pem"), filepath.Join(*certPath, "privkey.pem"), m))
+	} else {
+		log.Fatal(http.ListenAndServe(*serveAddr, m))
+	}
+}
+
+func redir(w http.ResponseWriter, req *http.Request) {
+	http.Redirect(w, req, "https://gocover.io"+req.RequestURI, http.StatusMovedPermanently)
 }
